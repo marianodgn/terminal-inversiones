@@ -8,6 +8,44 @@ import os
 from fpdf import FPDF
 import tempfile
 import base64
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import os
+from fpdf import FPDF
+import tempfile
+import base64
+
+# --- SISTEMA DE LOGIN (PUERTA DE SEGURIDAD) ---
+def check_password():
+    """Devuelve True si la contraseña es correcta."""
+    def password_entered():
+        # AQUÍ DEFINES TU CONTRASEÑA MAESTRA
+        if st.session_state["password"] == "admin1234": 
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # Borrar clave por seguridad
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        st.text_input("🔑 Ingrese su clave de acceso", type="password", on_change=password_entered, key="password")
+        return False
+    elif not st.session_state["password_correct"]:
+        st.text_input("🔑 Ingrese su clave de acceso", type="password", on_change=password_entered, key="password")
+        st.error("🚫 Acceso Denegado. Contraseña incorrecta.")
+        return False
+    else:
+        return True
+
+# Si la contraseña no es correcta, detenemos la app aquí mismo
+if not check_password():
+    st.stop()
+
+# --- AQUÍ EMPIEZA TODO TU CÓDIGO ORIGINAL DE LA TERMINAL ---
+# st.set_page_config(layout="wide", page_title="Terminal Pro V4.0", page_icon="⚡")
+# ... (todo el resto de tu código) ...
 
 # 1. CONFIGURACIÓN DE PÁGINA (Vivid Dark Mode)
 st.set_page_config(layout="wide", page_title="Terminal Pro V4.0", page_icon="⚡")
