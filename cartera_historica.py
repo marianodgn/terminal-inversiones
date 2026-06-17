@@ -241,14 +241,38 @@ with tab_ledger:
         kpi3.metric("P/L NETO (ARS)", f"$ {resultado_total:,.2f}")
         kpi4.metric("RENDIMIENTO GLOBAL", f"{((df_agrupado['Valor_Actual'].sum() / df_agrupado['Capital_Invertido'].sum()) - 1) * 100:.2f} %")
 
+        # --- GRÁFICOS RESTAURADOS ---
         st.markdown("---")
+        col_graf1, col_graf2 = st.columns(2)
+        paleta_dona = ['#66fcf1', '#45a29e', '#c5c6c7', '#ffffff', '#1f2833', '#8b9dc3']
+        
+        with col_graf1:
+            fig_pie = px.pie(df_agrupado, values='Valor_Actual', names='Empresa', hole=0.5,
+                             title=f"Distribución Patrimonial", color_discrete_sequence=paleta_dona)
+            fig_pie.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#c5c6c7'))
+            fig_pie.update_traces(marker=dict(line=dict(color='#0b0c10', width=3)))
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+        with col_graf2:
+            fig_wf = go.Figure(go.Waterfall(
+                name="P/L", orientation="v", measure=["relative"] * len(df_agrupado) + ["total"],
+                x=df_agrupado['Empresa'].tolist() + ["NET P/L"], y=df_agrupado['Resultado_ARS'].tolist() + [resultado_total],
+                textposition="outside", text=[f"${v:,.0f}" for v in df_agrupado['Resultado_ARS']] + [f"${resultado_total:,.0f}"],
+                decreasing={"marker":{"color":"#ff4655"}}, increasing={"marker":{"color":"#66fcf1"}}, totals={"marker":{"color":"#45a29e"}}      
+            ))
+            fig_wf.update_layout(title="Influencia de Ganancia/Pérdida", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#c5c6c7'))
+            st.plotly_chart(fig_wf, use_container_width=True)
+
+        # --- MATRIZ ---
+        st.markdown("---")
+        st.subheader("📊 MATRIZ DEL LEDGER")
         def highlight_target(row):
             if row['Rendimiento_%'] >= row['Objetivo_Promedio']: return ['background-color: rgba(102, 252, 241, 0.15); color: #66fcf1; border-left: 4px solid #66fcf1;'] * len(row)
             elif row['Rendimiento_%'] < 0: return ['background-color: rgba(255, 70, 85, 0.1); color: #ff4655;'] * len(row)
             return ['color: #c5c6c7;'] * len(row)
         st.dataframe(df_agrupado[['Empresa', 'Nominales', 'Costo_Entrada_Promedio', 'Precio_Actual', 'RSI_Actual', 'Objetivo_Promedio', 'Rendimiento_%', 'Resultado_ARS']].style.apply(highlight_target, axis=1), use_container_width=True)
 
-        # --- MOTOR DE SUGERENCIAS IA (INTERNO - RESTAURADO) ---
+        # --- MOTOR DE SUGERENCIAS IA (INTERNO) ---
         st.markdown("---")
         col_ia1, col_ia2 = st.columns([3,1])
         with col_ia1: st.subheader("🤖 SCANNER CUANTITATIVO (ACTIVOS EN CARTERA)")
