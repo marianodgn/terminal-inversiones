@@ -8,6 +8,7 @@ from plotly.subplots import make_subplots
 import os
 from fpdf import FPDF
 import tempfile
+import json
 
 # 1. CONFIGURACIÓN DE PÁGINA Y UI (Glassmorphism & Pulse)
 st.set_page_config(layout="wide", page_title="DSL - Dynamic Strategy Ledger", page_icon="💠")
@@ -51,20 +52,170 @@ def check_password():
         with st.sidebar:
             st.markdown(f"👤 **Operador:** `{st.session_state['usuario_actual'].upper()}`")
             if st.button("DESCONECTAR"):
-                st.session_state.update({"usuario_autenticado": False, "usuario_actual": None, "mi_cartera": [], "usuario_cargado": None})
+                st.session_state.update({"usuario_autenticado": False, "usuario_actual": None, "mi_cartera": [], "saldo_reserva_resultados": 0.0, "saldo_capital_reserva": 0.0, "usuario_cargado": None})
                 st.rerun()
         return True
 
 if not check_password(): st.stop()
 
 # --- GESTIÓN DE DATOS ---
+COLUMNAS_CARTERA = [
+    "ID_Orden", "Empresa", "Ticker", "Nominales", "Costo_Entrada", "Objetivo_%",
+    "Fecha_Compra", "Origen_Capital", "Aporte_Externo", "Uso_Reserva_Resultados"
+]
+COLUMNAS_MOVIMIENTOS_RESERVA = ["Fecha_Movimiento", "Tipo", "Concepto", "Activo", "Importe_Capital", "Resultado_Neto", "Saldo_Capital_Reserva", "Saldo_Reserva_Neta", "Saldo_Reserva"]
+
 def obtener_nombre_archivo(): return f"cartera_{st.session_state['usuario_actual']}.csv"
-def cargar_cartera(): return pd.read_csv(obtener_nombre_archivo()).to_dict('records') if os.path.exists(obtener_nombre_archivo()) else []
-def guardar_cartera(): pd.DataFrame(st.session_state.mi_cartera).to_csv(obtener_nombre_archivo(), index=False)
+def obtener_nombre_reserva(): return f"reserva_resultados_{st.session_state['usuario_actual']}.csv"
+def obtener_nombre_movimientos(): return f"movimientos_reserva_{st.session_state['usuario_actual']}.csv"
+def obtener_nombre_puntos_recuperacion(): return f"puntos_recuperacion_{st.session_state['usuario_actual']}.json"
+def leer_csv_seguro(archivo, columnas=None):
+    if not os.path.exists(archivo) or os.path.getsize(archivo) == 0:
+        return pd.DataFrame(columns=columnas)
+    try:
+        return pd.read_csv(archivo)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(columns=columnas)
+def numero_seguro(valor, default=0.0):
+    numero = pd.to_numeric(valor, errors='coerce')
+    return float(default) if pd.isna(numero) else float(numero)
+def cargar_cartera(): return leer_csv_seguro(obtener_nombre_archivo(), COLUMNAS_CARTERA).to_dict('records')
+def guardar_cartera(): pd.DataFrame(st.session_state.mi_cartera, columns=COLUMNAS_CARTERA).to_csv(obtener_nombre_archivo(), index=False)
+def cargar_saldos_reserva():
+    df_reserva = leer_csv_seguro(obtener_nombre_reserva(), ['Saldo_Capital_Reserva', 'Saldo_Reserva_Neta', 'Saldo_Reserva'])
+    if not df_reserva.empty:
+        if 'Saldo_Reserva_Neta' in df_reserva.columns:
+            saldo_neto = numero_seguro(df_reserva['Saldo_Reserva_Neta'].iloc[-1])
+        elif 'Saldo_Reserva' in df_reserva.columns:
+            saldo_neto = numero_seguro(df_reserva['Saldo_Reserva'].iloc[-1])
+        else:
+            saldo_neto = 0.0
+        saldo_capital = numero_seguro(df_reserva['Saldo_Capital_Reserva'].iloc[-1], max(saldo_neto, 0.0)) if 'Saldo_Capital_Reserva' in df_reserva.columns else max(saldo_neto, 0.0)
+        return saldo_capital, saldo_neto
+    return 0.0, 0.0
+def guardar_saldos_reserva():
+    pd.DataFrame([{
+        'Saldo_Capital_Reserva': round(float(st.session_state.saldo_capital_reserva), 2),
+        'Saldo_Reserva_Neta': round(float(st.session_state.saldo_reserva_resultados), 2),
+        'Saldo_Reserva': round(float(st.session_state.saldo_reserva_resultados), 2)
+    }]).to_csv(obtener_nombre_reserva(), index=False)
+def registrar_movimiento_reserva(tipo, concepto, importe_capital, resultado_neto, saldo_capital, saldo_neto, activo=None):
+    movimiento = {
+        'Fecha_Movimiento': str(pd.Timestamp.now()), 'Tipo': tipo, 'Concepto': concepto,
+        'Activo': activo or '', 'Importe_Capital': round(float(importe_capital), 2),
+        'Resultado_Neto': round(float(resultado_neto), 2),
+        'Saldo_Capital_Reserva': round(float(saldo_capital), 2),
+        'Saldo_Reserva_Neta': round(float(saldo_neto), 2), 'Saldo_Reserva': round(float(saldo_neto), 2)
+    }
+    archivo = obtener_nombre_movimientos()
+    df_mov = leer_csv_seguro(archivo, COLUMNAS_MOVIMIENTOS_RESERVA)
+    df_mov = pd.concat([df_mov, pd.DataFrame([movimiento])], ignore_index=True)
+    df_mov.to_csv(archivo, index=False)
+
+def obtener_movimientos_reserva():
+    df_mov = leer_csv_seguro(obtener_nombre_movimientos(), COLUMNAS_MOVIMIENTOS_RESERVA)
+    if 'Saldo_Reserva_Neta' not in df_mov.columns and 'Saldo_Reserva' in df_mov.columns:
+        df_mov['Saldo_Reserva_Neta'] = df_mov['Saldo_Reserva']
+    for columna in COLUMNAS_MOVIMIENTOS_RESERVA:
+        if columna not in df_mov.columns:
+            df_mov[columna] = 0.0 if columna in ['Importe_Capital', 'Resultado_Neto', 'Saldo_Capital_Reserva', 'Saldo_Reserva_Neta', 'Saldo_Reserva'] else ''
+    return df_mov
+
+def resetear_reservas():
+    st.session_state.saldo_capital_reserva = 0.0
+    st.session_state.saldo_reserva_resultados = 0.0
+    guardar_saldos_reserva()
+    archivo_movimientos = obtener_nombre_movimientos()
+    if os.path.exists(archivo_movimientos):
+        os.remove(archivo_movimientos)
+
+def resetear_reserva_capital():
+    st.session_state.saldo_capital_reserva = 0.0
+    guardar_saldos_reserva()
+
+def resetear_reserva_neta():
+    st.session_state.saldo_reserva_resultados = 0.0
+    guardar_saldos_reserva()
+
+def cargar_puntos_recuperacion():
+    archivo = obtener_nombre_puntos_recuperacion()
+    if not os.path.exists(archivo) or os.path.getsize(archivo) == 0:
+        return []
+    with open(archivo, 'r', encoding='utf-8') as f:
+        datos = json.load(f)
+    return datos if isinstance(datos, list) else []
+
+def guardar_puntos_recuperacion(puntos):
+    with open(obtener_nombre_puntos_recuperacion(), 'w', encoding='utf-8') as f:
+        json.dump(puntos, f, ensure_ascii=False, indent=2)
+
+def crear_punto_recuperacion(nombre):
+    puntos = cargar_puntos_recuperacion()
+    punto = {
+        'ID_Punto': int(pd.Timestamp.now().timestamp() * 1000),
+        'Nombre': nombre.strip() or f"Punto {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}",
+        'Fecha_Creacion': str(pd.Timestamp.now()),
+        'Cartera': st.session_state.mi_cartera,
+        'Saldo_Capital_Reserva': round(numero_seguro(st.session_state.saldo_capital_reserva), 2),
+        'Saldo_Reserva_Neta': round(numero_seguro(st.session_state.saldo_reserva_resultados), 2),
+        'Movimientos_Reserva': obtener_movimientos_reserva().to_dict('records')
+    }
+    puntos.append(punto)
+    guardar_puntos_recuperacion(puntos)
+
+def restaurar_punto_recuperacion(punto):
+    st.session_state.mi_cartera = punto.get('Cartera', [])
+    st.session_state.saldo_capital_reserva = numero_seguro(punto.get('Saldo_Capital_Reserva', 0.0))
+    st.session_state.saldo_reserva_resultados = numero_seguro(punto.get('Saldo_Reserva_Neta', punto.get('Saldo_Reserva', 0.0)))
+    guardar_cartera()
+    guardar_saldos_reserva()
+    pd.DataFrame(punto.get('Movimientos_Reserva', []), columns=COLUMNAS_MOVIMIENTOS_RESERVA).to_csv(obtener_nombre_movimientos(), index=False)
+
+def cerrar_posicion_por_cantidad(activo, cantidad_cierre, precio_cierre):
+    cantidad_pendiente = float(cantidad_cierre)
+    resultado_realizado = 0.0
+    capital_cerrado = 0.0
+    lotes_activo = sorted(
+        [pos for pos in st.session_state.mi_cartera if pos['Empresa'] == activo],
+        key=lambda pos: (str(pos.get('Fecha_Compra', '')), int(pos.get('ID_Orden', 0)))
+    )
+    cartera_actualizada = [pos for pos in st.session_state.mi_cartera if pos['Empresa'] != activo]
+
+    for posicion in lotes_activo:
+        nominales_lote = float(posicion['Nominales'])
+        if cantidad_pendiente <= 0:
+            cartera_actualizada.append(posicion)
+            continue
+
+        cantidad_a_cerrar = min(nominales_lote, cantidad_pendiente)
+        costo_lote = float(posicion['Costo_Entrada'])
+        resultado_realizado += (float(precio_cierre) - costo_lote) * cantidad_a_cerrar
+        capital_cerrado += costo_lote * cantidad_a_cerrar
+        cantidad_pendiente -= cantidad_a_cerrar
+
+        nominales_restantes = round(nominales_lote - cantidad_a_cerrar, 8)
+        if nominales_restantes > 0:
+            posicion_actualizada = posicion.copy()
+            posicion_actualizada['Nominales'] = nominales_restantes
+            cartera_actualizada.append(posicion_actualizada)
+
+    st.session_state.mi_cartera = sorted(
+        cartera_actualizada,
+        key=lambda pos: (str(pos.get('Fecha_Compra', '')), int(pos.get('ID_Orden', 0)))
+    )
+    valor_liquidado = float(precio_cierre) * float(cantidad_cierre)
+    return round(resultado_realizado, 2), round(capital_cerrado, 2), round(valor_liquidado, 2)
+
+def obtener_precio_actual_cierre(ticker):
+    hist = yf.Ticker(ticker).history(period="5d")
+    if not hist.empty:
+        return round(float(hist['Close'].iloc[-1]), 2)
+    return 0.0
 
 usuario_actual = st.session_state["usuario_actual"]
 if 'mi_cartera' not in st.session_state or st.session_state.get('usuario_cargado') != usuario_actual:
     st.session_state.mi_cartera = cargar_cartera()
+    st.session_state.saldo_capital_reserva, st.session_state.saldo_reserva_resultados = cargar_saldos_reserva()
     st.session_state['usuario_cargado'] = usuario_actual
 if 'mostrar_ia' not in st.session_state:
     st.session_state.mostrar_ia = False
@@ -173,26 +324,154 @@ with tab_ledger:
         nominales = st.number_input(etiqueta_cantidad, min_value=1.0, step=1.0)
         fecha = st.date_input("Fecha de Compra:")
         objetivo = st.number_input("Take Profit (%):", min_value=1.0, value=15.0, step=1.0)
+        st.markdown("#### Origen del capital")
+        valor_estimado_operacion = 0.0
+        origen_capital = st.radio(
+            "Fuente de fondeo:",
+            ["Aporte de capital externo", "Reserva de resultados realizados", "Fondeo mixto"],
+            help="Define si la nueva posición se financia con dinero nuevo, con ganancias/pérdidas realizadas acumuladas o con una combinación de ambas."
+        )
+        uso_reserva = 0.0
+        if origen_capital in ["Reserva de resultados realizados", "Fondeo mixto"]:
+            st.caption(f"Capital disponible en reserva: $ {st.session_state.saldo_capital_reserva:,.2f} | Resultado neto acumulado: $ {st.session_state.saldo_reserva_resultados:,.2f}")
+            uso_reserva = st.number_input("Monto a imputar desde la reserva:", min_value=0.0, value=0.0, step=1000.0)
         
         if st.button("INYECCIÓN DE DATOS"):
+
             hist = yf.Ticker(ticker_activo).history(start=fecha, end=fecha + pd.Timedelta(days=5))
             if not hist.empty:
-                st.session_state.mi_cartera.append({
-                    "ID_Orden": int(pd.Timestamp.now().timestamp() * 1000),
-                    "Empresa": seleccion, "Ticker": ticker_activo, "Nominales": nominales, 
-                    "Costo_Entrada": round(hist['Close'].iloc[0], 2), "Objetivo_%": objetivo, "Fecha_Compra": str(fecha)
-                })
-                guardar_cartera()
+                costo_entrada = round(hist['Close'].iloc[0], 2)
+                capital_operacion = round(costo_entrada * nominales, 2)
+                if origen_capital == "Aporte de capital externo" and uso_reserva > 0:
+                    st.error("Para aporte externo no debe imputar fondos desde la reserva.")
+                elif uso_reserva > st.session_state.saldo_capital_reserva:
+                    st.error("El monto imputado supera el saldo disponible en la reserva de resultados realizados.")
+                elif uso_reserva > capital_operacion:
+                    st.error("El monto imputado desde la reserva no puede superar el capital de la operación.")
+                elif origen_capital == "Reserva de resultados realizados" and uso_reserva != capital_operacion:
+                    st.error(f"Para fondeo íntegro desde reserva debe imputar exactamente $ {capital_operacion:,.2f}.")
+                else:
+                    aporte_externo = round(capital_operacion - uso_reserva, 2)
+                    st.session_state.mi_cartera.append({
+                        "ID_Orden": int(pd.Timestamp.now().timestamp() * 1000),
+                        "Empresa": seleccion, "Ticker": ticker_activo, "Nominales": nominales, 
+                        "Costo_Entrada": costo_entrada, "Objetivo_%": objetivo, "Fecha_Compra": str(fecha),
+                        "Origen_Capital": origen_capital, "Aporte_Externo": aporte_externo, "Uso_Reserva_Resultados": round(uso_reserva, 2)
+                    })
+                    if uso_reserva > 0:
+                        st.session_state.saldo_capital_reserva = numero_seguro(st.session_state.saldo_capital_reserva) - uso_reserva
+                        guardar_saldos_reserva()
+                        registrar_movimiento_reserva("Aplicación a inversión", f"Fondeo de {seleccion}", -uso_reserva, 0.0, st.session_state.saldo_capital_reserva, st.session_state.saldo_reserva_resultados, seleccion)
+                    guardar_cartera()
+                    st.session_state.mostrar_ia = False
+                    st.rerun()
+            else: st.error("Sin datos en esa fecha.")
+
+        st.markdown("---")
+        st.subheader("🏦 Reserva de resultados realizados")
+        st.metric("Capital liquidado disponible", f"$ {st.session_state.saldo_capital_reserva:,.2f}")
+        st.metric("Reserva neta acumulada", f"$ {st.session_state.saldo_reserva_resultados:,.2f}")
+        st.caption("Capital liquidado = efectivo bruto de cierres. Reserva neta = ganancias menos pérdidas realizadas.")
+        col_reset_capital, col_reset_neta = st.columns(2)
+        with col_reset_capital:
+            if st.button("RESET CAPITAL"):
+                resetear_reserva_capital()
                 st.session_state.mostrar_ia = False
                 st.rerun()
-            else: st.error("Sin datos en esa fecha.")
+        with col_reset_neta:
+            if st.button("RESET NETA"):
+                resetear_reserva_neta()
+                st.session_state.mostrar_ia = False
+                st.rerun()
+        if st.button("RESETEAR AMBAS RESERVAS"):
+            resetear_reservas()
+            st.session_state.mostrar_ia = False
+            st.rerun()
+
+        st.markdown("#### Punto de recuperación")
+        nombre_punto = st.text_input("Nombre del guardado:", value=f"Guardado {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}")
+        if st.button("GUARDAR PUNTO DE RECUPERACIÓN"):
+            crear_punto_recuperacion(nombre_punto)
+            st.success("Punto de recuperación guardado.")
+        puntos_recuperacion = cargar_puntos_recuperacion()
+        if puntos_recuperacion:
+            opciones_puntos = {f"{p['Nombre']} | {p['Fecha_Creacion']}": p for p in puntos_recuperacion}
+            punto_seleccionado = st.selectbox("Volver a un punto guardado:", list(opciones_puntos.keys()))
+            if st.button("RESTAURAR PUNTO SELECCIONADO"):
+                restaurar_punto_recuperacion(opciones_puntos[punto_seleccionado])
+                st.session_state.mostrar_ia = False
+                st.rerun()
+
+        with st.expander("Movimientos de reserva"):
+            movimientos_reserva = obtener_movimientos_reserva()
+            if movimientos_reserva.empty:
+                st.info("Aún no hay cierres registrados en la reserva.")
+            else:
+                columnas_reserva = ['Fecha_Movimiento', 'Tipo', 'Activo', 'Importe_Capital', 'Resultado_Neto', 'Saldo_Capital_Reserva', 'Saldo_Reserva_Neta']
+                st.dataframe(movimientos_reserva[columnas_reserva], use_container_width=True)
 
         st.markdown("---")
         if st.session_state.mi_cartera:
             df_historial = pd.DataFrame(st.session_state.mi_cartera)
+            df_historial['Capital_Original'] = df_historial['Costo_Entrada'] * df_historial['Nominales']
+            resumen_cierre = df_historial.groupby(['Empresa', 'Ticker']).agg(
+                Nominales_Disponibles=('Nominales', 'sum'),
+                Capital_Original=('Capital_Original', 'sum')
+            ).reset_index()
+            resumen_cierre['Costo_Promedio'] = resumen_cierre['Capital_Original'] / resumen_cierre['Nominales_Disponibles']
+
+            opciones_activos_cierre = resumen_cierre.index.tolist()
+            activo_cierre_idx = st.selectbox(
+                "Activo a cerrar parcialmente:",
+                opciones_activos_cierre,
+                format_func=lambda idx: f"{resumen_cierre.loc[idx, 'Empresa']} ({resumen_cierre.loc[idx, 'Ticker']})"
+            )
+            fila_cierre = resumen_cierre.loc[activo_cierre_idx]
+            activo_cierre = fila_cierre['Empresa']
+            ticker_cierre = fila_cierre['Ticker']
+            cantidad_disponible = float(fila_cierre['Nominales_Disponibles'])
+            etiqueta_cierre = "Cantidad de divisa a cerrar:" if activo_cierre == "DÓLAR OFICIAL" else "Nominales a cerrar:"
+            st.caption(f"Disponible en cartera: {cantidad_disponible:,.2f} | Costo promedio: $ {float(fila_cierre['Costo_Promedio']):,.2f}")
+            if activo_cierre == "DÓLAR OFICIAL":
+                cantidad_cierre = st.number_input(etiqueta_cierre, min_value=0.0, max_value=cantidad_disponible, value=min(1.0, cantidad_disponible), step=1.0)
+            else:
+                opciones_nominales = list(range(1, int(cantidad_disponible) + 1))
+                cantidad_cierre = st.selectbox(etiqueta_cierre, opciones_nominales, index=len(opciones_nominales) - 1) if opciones_nominales else 0
+            precio_actual_cierre = obtener_precio_actual_cierre(ticker_cierre)
+            precio_sugerido_cierre = precio_actual_cierre if precio_actual_cierre > 0 else float(fila_cierre['Costo_Promedio'])
+            st.caption(f"Precio actual de referencia: $ {precio_sugerido_cierre:,.2f} ARS. Puede ajustarlo manualmente si su precio efectivo de operación fue distinto.")
+            precio_cierre = st.number_input(
+                "Precio efectivo de cierre:",
+                min_value=0.0,
+                value=float(precio_sugerido_cierre),
+                step=1.0,
+                key=f"precio_cierre_{ticker_cierre}"
+            )
+            valor_estimado_liquidado = precio_cierre * cantidad_cierre
+            resultado_estimado = (precio_cierre - float(fila_cierre['Costo_Promedio'])) * cantidad_cierre
+            st.caption(f"Capital bruto estimado a reserva: $ {valor_estimado_liquidado:,.2f} | Resultado neto estimado: $ {resultado_estimado:,.2f}.")
+            if st.button("CERRAR CANTIDAD Y REALIZAR RESULTADO"):
+                if cantidad_cierre <= 0:
+                    st.error("Debe ingresar una cantidad mayor a cero para cerrar la posición.")
+                else:
+                    resultado_realizado, capital_cerrado, valor_liquidado = cerrar_posicion_por_cantidad(activo_cierre, cantidad_cierre, precio_cierre)
+                    st.session_state.saldo_capital_reserva = numero_seguro(st.session_state.saldo_capital_reserva) + valor_liquidado
+                    st.session_state.saldo_reserva_resultados = numero_seguro(st.session_state.saldo_reserva_resultados) + resultado_realizado
+                    registrar_movimiento_reserva(
+                        "Cierre de posición",
+                        f"Cierre parcial de {cantidad_cierre:,.2f} unidades a $ {precio_cierre:,.2f} | Costo original: $ {capital_cerrado:,.2f}",
+                        valor_liquidado, resultado_realizado, st.session_state.saldo_capital_reserva, st.session_state.saldo_reserva_resultados, activo_cierre
+                    )
+                    guardar_saldos_reserva()
+                    guardar_cartera()
+                    st.session_state.mostrar_ia = False
+                    st.rerun()
+
+            st.markdown("---")
             opciones_borrar = [f"{row['Empresa']} ({row['Fecha_Compra']}) - {row['Nominales']}" for _, row in df_historial.iterrows()]
-            a_borrar_idx = st.selectbox("Seleccionar para purgar:", range(len(opciones_borrar)), format_func=lambda x: opciones_borrar[x])
+            a_borrar_idx = st.selectbox("Seleccionar para purgar sin impacto contable:", range(len(opciones_borrar)), format_func=lambda x: opciones_borrar[x])
             if st.button("PURGAR DATO"):
+
                 del st.session_state.mi_cartera[a_borrar_idx]
                 guardar_cartera()
                 st.session_state.mostrar_ia = False
@@ -234,12 +513,13 @@ with tab_ledger:
             if not rsi_venta.empty: msg.append(f"🔴 <b>RIESGO CORRECCIÓN (RSI > 70):</b> {', '.join(rsi_venta['Empresa'].tolist())}")
             espacio_alerta_rsi.markdown(f"<div class='rsi-alert'><b>📊 ALERTAS TÉCNICAS EN CARTERA:</b><br><br>{'<br>'.join(msg)}</div>", unsafe_allow_html=True)
 
-        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+        kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
         kpi1.metric("CAPITAL DESPLEGADO", f"$ {df_agrupado['Capital_Invertido'].sum():,.2f}")
         kpi2.metric("VALOR DE MERCADO", f"$ {df_agrupado['Valor_Actual'].sum():,.2f}")
         resultado_total = df_agrupado['Resultado_ARS'].sum()
         kpi3.metric("P/L NETO (ARS)", f"$ {resultado_total:,.2f}")
         kpi4.metric("RENDIMIENTO GLOBAL", f"{((df_agrupado['Valor_Actual'].sum() / df_agrupado['Capital_Invertido'].sum()) - 1) * 100:.2f} %")
+        kpi5.metric("RESERVA BRUTA / NETA", f"$ {st.session_state.saldo_capital_reserva:,.2f}", f"Neta $ {st.session_state.saldo_reserva_resultados:,.2f}")
 
         # --- GRÁFICOS RESTAURADOS ---
         st.markdown("---")
@@ -271,6 +551,17 @@ with tab_ledger:
             elif row['Rendimiento_%'] < 0: return ['background-color: rgba(255, 70, 85, 0.1); color: #ff4655;'] * len(row)
             return ['color: #c5c6c7;'] * len(row)
         st.dataframe(df_agrupado[['Empresa', 'Nominales', 'Costo_Entrada_Promedio', 'Precio_Actual', 'RSI_Actual', 'Objetivo_Promedio', 'Rendimiento_%', 'Resultado_ARS']].style.apply(highlight_target, axis=1), use_container_width=True)
+
+        with st.expander("🏦 Detalle de fondeo por inyección"):
+            columnas_fondeo = ['Empresa', 'Fecha_Compra', 'Nominales', 'Costo_Entrada', 'Origen_Capital', 'Aporte_Externo', 'Uso_Reserva_Resultados']
+            for col in columnas_fondeo:
+                if col not in df_raw.columns:
+                    df_raw[col] = 0.0 if col in ['Aporte_Externo', 'Uso_Reserva_Resultados'] else 'No informado'
+            st.dataframe(df_raw[columnas_fondeo], use_container_width=True)
+            archivo_mov = obtener_nombre_movimientos()
+            if os.path.exists(archivo_mov):
+                st.markdown("**Movimientos de la reserva de resultados realizados**")
+                st.dataframe(obtener_movimientos_reserva(), use_container_width=True)
 
         # --- MOTOR DE SUGERENCIAS IA (INTERNO) ---
         st.markdown("---")
